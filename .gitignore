@@ -1,0 +1,14 @@
+# macOS
+.DS_Store
+
+# Editor backups
+*~
+*.swp
+*.swo
+
+# Generated tmux backups
+tmux.conf.backup*
+*.tmux.conf.bak
+
+# Project scaffolding
+design/
