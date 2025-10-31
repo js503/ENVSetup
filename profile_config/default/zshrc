@@ -1,0 +1,5 @@
+# Default zsh configuration profile.
+# Extend this file with aliases, exports, and prompt customizations as needed.
+
+# Keep PATH modifications minimal; customize per-profile if necessary.
+# export PATH="$HOME/bin:$PATH"
