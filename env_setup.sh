@@ -9,7 +9,7 @@ readonly SCRIPT_PATH="${BASH_SOURCE[0]}"
 readonly SCRIPT_NAME=$(basename "${SCRIPT_PATH}")
 readonly SCRIPT_DIR=$(cd "$(dirname "${SCRIPT_PATH}")" && pwd)
 readonly PROJECT_ROOT="${SCRIPT_DIR}"
-readonly MENU_OPTIONS=("Default" "Exit")
+readonly MENU_OPTIONS=("Developer" "Default" "Exit")
 readonly MENU_ARROW_TIMEOUT=1
 readonly BANNER_LINE="============================================================="
 readonly BANNER_TITLE="Environment Setup"
@@ -17,14 +17,26 @@ readonly INSTALL_ATTEMPTED_MSG="Attempting to install tmux automatically."
 readonly GH_INSTALL_ATTEMPTED_MSG="Attempting to install GitHub CLI automatically."
 readonly PROFILE_ROOT="${PROJECT_ROOT}/profile_config"
 readonly DEFAULT_PROFILE="default"
+readonly DEVELOPER_PROFILE="developer"
 readonly TMUX_CONFIG_TARGET_DEFAULT="${HOME}/.tmux.conf"
 readonly SHELL_CONFIG_TARGET_DEFAULT="${HOME}/.zshrc"
+readonly TMUX_MENU_SOURCE_DEFAULT="${PROJECT_ROOT}/menu_helpers/tmux_menu.sh"
+readonly TMUX_MENU_TARGET_DEFAULT="${HOME}/.local/bin/tmux_menu.sh"
 TMUX_CONFIG_TARGET_PATH="${TMUX_CONFIG_TARGET:-$TMUX_CONFIG_TARGET_DEFAULT}"
 readonly TMUX_CONFIG_TARGET_PATH
 SHELL_CONFIG_TARGET_PATH="${SHELL_CONFIG_TARGET:-$SHELL_CONFIG_TARGET_DEFAULT}"
 readonly SHELL_CONFIG_TARGET_PATH
+TMUX_MENU_SOURCE_PATH="${TMUX_MENU_SOURCE:-$TMUX_MENU_SOURCE_DEFAULT}"
+readonly TMUX_MENU_SOURCE_PATH
+TMUX_MENU_TARGET_PATH="${TMUX_MENU_TARGET:-$TMUX_MENU_TARGET_DEFAULT}"
+readonly TMUX_MENU_TARGET_PATH
+readonly PROFILE_MENU_DESCRIPTION="Use arrow keys to choose a profile and press Enter to select."
+readonly RELOAD_MENU_DESCRIPTION="Choose how to handle configuration reloads after setup."
 
 declare MENU_SELECTION=""
+MENU_DESCRIPTION="$PROFILE_MENU_DESCRIPTION"
+AUTO_RELOAD_TMUX=false
+AUTO_SOURCE_ZSH=false
 
 print_usage() {
   cat <<EOF
@@ -99,6 +111,69 @@ copy_if_different() {
   return 1
 }
 
+reload_tmux_config() {
+  if ! command -v tmux >/dev/null 2>&1; then
+    log_info "Skipping tmux reload because tmux is not on PATH."
+    return 0
+  fi
+
+  local target_config=${TMUX_CONFIG_TARGET_PATH/#\~/$HOME}
+
+  log_info "Reloading tmux configuration from ${target_config}."
+  tmux start-server >/dev/null 2>&1 || true
+  if tmux source-file "$target_config" >/dev/null 2>&1; then
+    log_info "tmux configuration reloaded into current server."
+    return 0
+  fi
+
+  log_info "No active tmux server to reload; configuration will apply on next session."
+  return 0
+}
+
+validate_zsh_config() {
+  if ! command -v zsh >/dev/null 2>&1; then
+    log_info "Skipping zsh reload because zsh is not on PATH."
+    return 0
+  fi
+
+  local target_config=${SHELL_CONFIG_TARGET_PATH/#\~/$HOME}
+  if [[ ! -f $target_config ]]; then
+    log_info "Skipping zsh reload because target config does not exist."
+    return 0
+  fi
+
+  log_info "Validating zsh configuration via non-interactive zsh shell."
+  if zsh -ic "source \"$target_config\"" >/dev/null 2>&1; then
+    log_info "zsh configuration validated successfully."
+    return 0
+  fi
+
+  log_error "Failed to source zsh configuration; check ${target_config} for issues."
+  return 1
+}
+
+source_zsh_config_now() {
+  local target_config=${SHELL_CONFIG_TARGET_PATH/#\~/$HOME}
+
+  if [[ ! -f $target_config ]]; then
+    log_error "zsh configuration not found at ${target_config}."
+    return 1
+  fi
+
+  if ! command -v zsh >/dev/null 2>&1; then
+    log_error "zsh binary not found; cannot source configuration automatically."
+    return 1
+  fi
+
+  if zsh -ic "source \"$target_config\"" >/dev/null 2>&1; then
+    log_info "Sourced zsh configuration via non-interactive zsh shell."
+    return 0
+  fi
+
+  log_error "Encountered an error while sourcing ${target_config}."
+  return 1
+}
+
 apply_tmux_config() {
   local profile=${1:-$DEFAULT_PROFILE}
   local profile_dir
@@ -141,6 +216,70 @@ apply_shell_config() {
   log_info "Applying zsh config from profile '${profile}' to ${target_config}."
 
   copy_if_different "$source_config" "$target_config"
+}
+
+install_tmux_menu_helper() {
+  local source=${TMUX_MENU_SOURCE_PATH}
+  local target=${TMUX_MENU_TARGET_PATH/#\~/$HOME}
+
+  if [[ ! -f $source ]]; then
+    log_error "tmux menu helper not found at ${source}"
+    return 1
+  fi
+
+  log_info "Installing tmux menu helper to ${target}."
+  copy_if_different "$source" "$target" || return 1
+
+  if chmod +x "$target"; then
+    log_info "Ensured tmux menu helper is executable."
+  else
+    log_error "Failed to mark ${target} as executable."
+    return 1
+  fi
+
+  return 0
+}
+
+choose_reload_strategy() {
+  local previous_description=$MENU_DESCRIPTION
+  MENU_DESCRIPTION="$RELOAD_MENU_DESCRIPTION"
+
+  AUTO_RELOAD_TMUX=false
+  AUTO_SOURCE_ZSH=false
+
+  local options=(
+    "Reload tmux & zsh after setup"
+    "Skip reload; show manual commands"
+    "Cancel setup"
+  )
+
+  interactive_menu "${options[@]}"
+  local choice=$MENU_SELECTION
+
+  MENU_DESCRIPTION="$previous_description"
+
+  case $choice in
+    "Reload tmux & zsh after setup")
+      AUTO_RELOAD_TMUX=true
+      AUTO_SOURCE_ZSH=true
+      log_info "Selected: reload tmux and zsh after setup."
+      return 0
+      ;;
+    "Skip reload; show manual commands")
+      AUTO_RELOAD_TMUX=false
+      AUTO_SOURCE_ZSH=false
+      log_info "Selected: skip automatic reloads; manual commands will be provided."
+      return 0
+      ;;
+    "Cancel setup"|"Exit")
+      log_info "Reload preference selection canceled."
+      return 1
+      ;;
+    *)
+      log_error "Unexpected selection while choosing reload preference."
+      return 1
+      ;;
+  esac
 }
 
 detect_os() {
@@ -320,7 +459,7 @@ draw_menu() {
 
   clear_screen
   printf "%s\n%s\n%s\n\n" "$BANNER_LINE" "$BANNER_TITLE" "$BANNER_LINE"
-  printf "Use arrow keys to navigate to which profile and press Enter to select.\n"
+  printf "%s\n" "$MENU_DESCRIPTION"
   printf "Press 'q' at any time to exit. Vim keys (j/k) also work.\n\n"
 
   for idx in "${!options[@]}"; do
@@ -424,6 +563,43 @@ handle_profile_setup() {
     log_error "Failed to apply zsh configuration."
     return 1
   fi
+
+  if validate_zsh_config; then
+    log_info "zsh configuration validation succeeded."
+  else
+    log_error "zsh configuration validation failed."
+    return 1
+  fi
+
+  if install_tmux_menu_helper; then
+    log_info "tmux menu helper installed successfully."
+  else
+    log_error "Failed to install tmux menu helper."
+    return 1
+  fi
+  local tmux_cmd="tmux source-file ${TMUX_CONFIG_TARGET_PATH/#\~/$HOME}"
+  if [[ $AUTO_RELOAD_TMUX == true ]]; then
+    if reload_tmux_config; then
+      log_info "tmux configuration reload attempted automatically (active servers updated)."
+    else
+      log_error "Automatic tmux reload reported an error."
+    fi
+    log_info "Manual command (if needed): ${tmux_cmd}"
+  else
+    log_info "tmux reload skipped. Run this command later: ${tmux_cmd}"
+  fi
+
+  local zsh_cmd="source ${SHELL_CONFIG_TARGET_PATH/#\~/$HOME}"
+  if [[ $AUTO_SOURCE_ZSH == true ]]; then
+    if source_zsh_config_now; then
+      log_info "zsh configuration sourced via non-interactive zsh. Run '${zsh_cmd}' in your active terminal to apply aliases."
+    else
+      log_error "Automatic zsh sourcing reported an error."
+      log_info "Manual command (from your shell): ${zsh_cmd}"
+    fi
+  else
+    log_info "zsh sourcing skipped. Run this later in your shell: ${zsh_cmd}"
+  fi
 }
 
 parse_args() {
@@ -447,19 +623,33 @@ parse_args() {
 main() {
   parse_args "$@"
 
+  MENU_DESCRIPTION="$PROFILE_MENU_DESCRIPTION"
   interactive_menu "${MENU_OPTIONS[@]}"
-  printf "%s\n%s\n%s\n" "$BANNER_LINE" "$BANNER_TITLE" "$BANNER_LINE"
-  log_info "Selected: ${MENU_SELECTION:-<none>}"
+  local profile_choice=$MENU_SELECTION
 
-  case $MENU_SELECTION in
+  printf "%s\n%s\n%s\n" "$BANNER_LINE" "$BANNER_TITLE" "$BANNER_LINE"
+  log_info "Selected profile: ${profile_choice:-<none>}"
+
+  if [[ $profile_choice == "Exit" ]]; then
+    log_info "Goodbye!"
+    printf "\n%s\n" "$BANNER_LINE"
+    return 0
+  fi
+
+  if ! choose_reload_strategy; then
+    printf "\n%s\n" "$BANNER_LINE"
+    return 0
+  fi
+
+  case $profile_choice in
     Default)
       handle_profile_setup "$DEFAULT_PROFILE"
       ;;
-    Exit)
-      log_info "Goodbye!"
+    Developer)
+      handle_profile_setup "$DEVELOPER_PROFILE"
       ;;
     *)
-      log_error "No valid selection detected."
+      log_error "No valid profile selection detected."
       printf "\n%s\n" "$BANNER_LINE"
       exit 1
       ;;

@@ -1,5 +1,15 @@
 # Default zsh configuration profile.
 # Extend this file with aliases, exports, and prompt customizations as needed.
 
-# Keep PATH modifications minimal; customize per-profile if necessary.
-# export PATH="$HOME/bin:$PATH"
+# Aliases
+## Tmux
+# (Add tmux-related aliases here)
+
+## Misc
+# (Add general-purpose aliases here)
+
+# Helper Functions: Tmux
+# (Add tmux helper functions here)
+
+# Helper Functions: Misc
+# (Add additional helper functions here)

@@ -1,0 +1,76 @@
+# Developer zsh profile shortcuts for tmux workflows.
+
+# Location of the interactive tmux menu helper installed by env_setup.sh.
+export ENV_SETUP_TMUX_MENU="${ENV_SETUP_TMUX_MENU:-$HOME/.local/bin/tmux_menu.sh}"
+
+# Aliases
+## Tmux
+alias tv='envsetup_tmux_tv'
+alias tls='envsetup_tmux_tls'
+alias tko='envsetup_tmux_tko'
+alias tveh='envsetup_tmux_tveh'
+alias thelp='envsetup_tmux_thelp'
+
+# Helper Functions: Tmux
+envsetup_tmux_tv() {
+  local session_name=${1:-default}
+
+  if ! command -v tmux >/dev/null 2>&1; then
+    echo "tmux is not available on PATH." >&2
+    return 1
+  fi
+
+  if tmux has-session -t "$session_name" 2>/dev/null; then
+    tmux attach-session -t "$session_name"
+  else
+    tmux new-session -s "$session_name"
+  fi
+}
+
+envsetup_tmux_tls() {
+  if [[ -x "$ENV_SETUP_TMUX_MENU" ]]; then
+    "$ENV_SETUP_TMUX_MENU"
+  else
+    echo "tmux menu helper not found at $ENV_SETUP_TMUX_MENU" >&2
+    echo "Run env_setup.sh to install or set ENV_SETUP_TMUX_MENU manually." >&2
+    return 1
+  fi
+}
+
+envsetup_tmux_tko() {
+  if ! command -v tmux >/dev/null 2>&1; then
+    echo "tmux is not available on PATH." >&2
+    return 1
+  fi
+
+  if tmux list-sessions >/dev/null 2>&1; then
+    tmux kill-server
+    echo "All tmux sessions terminated."
+  else
+    echo "No tmux sessions found."
+  fi
+}
+
+envsetup_tmux_tveh() {
+  if [[ -z ${TMUX:-} ]]; then
+    echo "tveh must be run inside a tmux session." >&2
+    return 1
+  fi
+
+  tmux select-layout even-horizontal
+}
+
+# Display tmux help summary.
+envsetup_tmux_thelp() {
+  cat <<'TMUX_HELP'
+Tmux Quick Reference
+--------------------
+Prefix (Ctrl-b) + c    Create new window
+Prefix + ,             Rename window
+Prefix + %             Split pane vertically
+Prefix + "             Split pane horizontally
+Prefix + arrow keys    Navigate panes
+Prefix + [             Enter copy mode
+Prefix + d             Detach session
+TMUX_HELP
+}
