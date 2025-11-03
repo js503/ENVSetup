@@ -9,8 +9,7 @@ readonly SCRIPT_PATH="${BASH_SOURCE[0]}"
 readonly SCRIPT_NAME=$(basename "${SCRIPT_PATH}")
 readonly SCRIPT_DIR=$(cd "$(dirname "${SCRIPT_PATH}")" && pwd)
 readonly PROJECT_ROOT="${SCRIPT_DIR}"
-readonly MENU_OPTIONS=("Developer" "Default" "Exit")
-readonly MENU_ARROW_TIMEOUT=1
+readonly MENU_OPTIONS=("Developer" "Default" "Backups" "Exit")
 readonly BANNER_LINE="============================================================="
 readonly BANNER_TITLE="Environment Setup"
 readonly INSTALL_ATTEMPTED_MSG="Attempting to install tmux automatically."
@@ -22,6 +21,7 @@ readonly TMUX_CONFIG_TARGET_DEFAULT="${HOME}/.tmux.conf"
 readonly SHELL_CONFIG_TARGET_DEFAULT="${HOME}/.zshrc"
 readonly TMUX_MENU_SOURCE_DEFAULT="${PROJECT_ROOT}/menu_helpers/tmux_menu.sh"
 readonly TMUX_MENU_TARGET_DEFAULT="${HOME}/.local/bin/tmux_menu.sh"
+readonly BACKUP_ROOT="${HOME}/env_setup_backups"
 TMUX_CONFIG_TARGET_PATH="${TMUX_CONFIG_TARGET:-$TMUX_CONFIG_TARGET_DEFAULT}"
 readonly TMUX_CONFIG_TARGET_PATH
 SHELL_CONFIG_TARGET_PATH="${SHELL_CONFIG_TARGET:-$SHELL_CONFIG_TARGET_DEFAULT}"
@@ -33,10 +33,12 @@ readonly TMUX_MENU_TARGET_PATH
 readonly PROFILE_MENU_DESCRIPTION="Use arrow keys to choose a profile and press Enter to select."
 readonly RELOAD_MENU_DESCRIPTION="Choose how to handle configuration reloads after setup."
 
-declare MENU_SELECTION=""
-MENU_DESCRIPTION="$PROFILE_MENU_DESCRIPTION"
+readonly ENV_SETUP_MENU_HELPER="${PROJECT_ROOT}/menu_helpers/env_setup_menu.sh"
+
 AUTO_RELOAD_TMUX=false
 AUTO_SOURCE_ZSH=false
+ENVSETUP_BACKUP_TIMESTAMP=""
+ENVSETUP_SELECTED_BACKUP=""
 
 print_usage() {
   cat <<EOF
@@ -55,6 +57,14 @@ log_error() {
   printf "[ERROR] %s\n" "$*" >&2
 }
 
+if [[ -f $ENV_SETUP_MENU_HELPER ]]; then
+  # shellcheck source=/dev/null
+  . "$ENV_SETUP_MENU_HELPER"
+else
+  log_error "Menu helper not found at ${ENV_SETUP_MENU_HELPER}. Exiting."
+  exit 1
+fi
+
 resolve_profile_path() {
   local profile=$1
   printf "%s/%s" "${PROFILE_ROOT}" "${profile}"
@@ -72,18 +82,71 @@ ensure_directory() {
   return 1
 }
 
-backup_file() {
-  local target=$1
-  local timestamp
-  timestamp=$(date +"%Y%m%d%H%M%S")
-  local backup_path="${target}.backup-${timestamp}"
+init_backup_timestamp() {
+  if [[ -z ${ENVSETUP_BACKUP_TIMESTAMP:-} ]]; then
+    ENVSETUP_BACKUP_TIMESTAMP=$(date +"%Y%m%d%H%M%S")
+  fi
+}
 
-  if cp "$target" "$backup_path"; then
-    log_info "Created backup: ${backup_path}"
+ensure_backup_root() {
+  ensure_directory "$BACKUP_ROOT"
+}
+
+rotate_backups() {
+  if [[ ! -d $BACKUP_ROOT ]]; then
     return 0
   fi
 
-  log_error "Failed to create backup for ${target}"
+  local backup_dirs=()
+  while IFS= read -r dir; do
+    backup_dirs+=("$dir")
+  done < <(find "$BACKUP_ROOT" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort)
+
+  local total=${#backup_dirs[@]}
+  local keep=3
+
+  if (( total <= keep )); then
+    return 0
+  fi
+
+  local to_remove=$((total - keep))
+  for ((i=0; i<to_remove; i++)); do
+    local dir_path="${backup_dirs[$i]}"
+    local dir_name=$(basename "$dir_path")
+    if rm -rf "$dir_path"; then
+      log_info "Removed old backup set: ${dir_name}"
+    fi
+  done
+}
+
+backup_current_file() {
+  local target=$1
+
+  init_backup_timestamp
+  ensure_backup_root || return 1
+
+  local backup_dir="${BACKUP_ROOT}/${ENVSETUP_BACKUP_TIMESTAMP}"
+  ensure_directory "$backup_dir" || return 1
+
+  local target_abs=${target/#\~/$HOME}
+  local relative_path=""
+  if [[ $target_abs == $HOME/* ]]; then
+    relative_path="${target_abs#$HOME/}"
+  else
+    relative_path="$(basename "$target_abs")"
+  fi
+
+  local destination_dir="$backup_dir/$(dirname "$relative_path")"
+  ensure_directory "$destination_dir" || return 1
+  local backup_path="$backup_dir/$relative_path"
+
+  if cp "$target_abs" "$backup_path"; then
+    log_info "Created backup: ${backup_path}"
+    rotate_backups
+    return 0
+  fi
+
+  log_error "Failed to create backup for ${target_abs}"
   return 1
 }
 
@@ -97,7 +160,7 @@ copy_if_different() {
   fi
 
   if [[ -f $target ]]; then
-    backup_file "$target" || return 1
+    backup_current_file "$target" || return 1
   else
     ensure_directory "$(dirname "$target")" || return 1
   fi
@@ -240,46 +303,83 @@ install_tmux_menu_helper() {
   return 0
 }
 
-choose_reload_strategy() {
-  local previous_description=$MENU_DESCRIPTION
-  MENU_DESCRIPTION="$RELOAD_MENU_DESCRIPTION"
+restore_backup_timestamp() {
+  local timestamp=$1
+  local backup_dir="${BACKUP_ROOT}/${timestamp}"
 
-  AUTO_RELOAD_TMUX=false
-  AUTO_SOURCE_ZSH=false
+  if [[ ! -d $backup_dir ]]; then
+    log_error "Backup set ${timestamp} not found."
+    return 1
+  fi
 
-  local options=(
-    "Reload tmux & zsh after setup"
-    "Skip reload; show manual commands"
-    "Cancel setup"
-  )
+  local restored=false
 
-  interactive_menu "${options[@]}"
-  local choice=$MENU_SELECTION
+  while IFS= read -r -d '' backup_file; do
+    local rel_path="${backup_file#$backup_dir/}"
+    local target_path="${HOME}/${rel_path}"
 
-  MENU_DESCRIPTION="$previous_description"
+    if [[ -f $target_path ]]; then
+      backup_current_file "$target_path" || return 1
+    else
+      ensure_directory "$(dirname "$target_path")" || return 1
+    fi
 
-  case $choice in
-    "Reload tmux & zsh after setup")
-      AUTO_RELOAD_TMUX=true
-      AUTO_SOURCE_ZSH=true
-      log_info "Selected: reload tmux and zsh after setup."
-      return 0
-      ;;
-    "Skip reload; show manual commands")
-      AUTO_RELOAD_TMUX=false
-      AUTO_SOURCE_ZSH=false
-      log_info "Selected: skip automatic reloads; manual commands will be provided."
-      return 0
-      ;;
-    "Cancel setup"|"Exit")
-      log_info "Reload preference selection canceled."
+    if cp "$backup_file" "$target_path"; then
+      log_info "Restored ${rel_path} from backup ${timestamp}."
+      restored=true
+    else
+      log_error "Failed to restore ${rel_path} from ${backup_file}."
       return 1
-      ;;
-    *)
-      log_error "Unexpected selection while choosing reload preference."
-      return 1
-      ;;
-  esac
+    fi
+  done < <(find "$backup_dir" -type f -print0 2>/dev/null)
+
+  if [[ $restored == false ]]; then
+    log_error "Backup set ${timestamp} did not contain files to restore."
+    return 1
+  fi
+
+  return 0
+}
+
+handle_backup_restore() {
+  if [[ ! -d $BACKUP_ROOT ]]; then
+    log_info "No backups found at ${BACKUP_ROOT}."
+    return 0
+  fi
+
+  local backup_dirs=()
+  while IFS= read -r dir; do
+    backup_dirs+=("$dir")
+  done < <(find "$BACKUP_ROOT" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort -r)
+
+  if [[ ${#backup_dirs[@]} -eq 0 ]]; then
+    log_info "No backups available to restore."
+    return 0
+  fi
+
+  local options=()
+  for dir_path in "${backup_dirs[@]}"; do
+    options+=("$(basename "$dir_path")")
+  done
+  options+=("Cancel")
+
+  ENVSETUP_SELECTED_BACKUP=""
+  envsetup_menu_select_backup "Backup Restore" "Select a backup timestamp to restore." "${options[@]}"
+  local selected="${ENVSETUP_SELECTED_BACKUP:-}"
+
+  if [[ -z $selected || $selected == "Cancel" || $selected == "Exit" ]]; then
+    log_info "Backup restore canceled."
+    return 0
+  fi
+
+  if restore_backup_timestamp "$selected"; then
+    log_info "Backup ${selected} restored successfully."
+  else
+    log_error "Failed to restore backup ${selected}."
+    return 1
+  fi
+
+  return 0
 }
 
 detect_os() {
@@ -444,85 +544,6 @@ ensure_github_cli_installed() {
   return 1
 }
 
-clear_screen() {
-  if command -v tput >/dev/null 2>&1; then
-    tput clear || printf "\033[2J\033[H"
-  else
-    printf "\033[2J\033[H"
-  fi
-}
-
-draw_menu() {
-  local selected=$1
-  shift
-  local options=("$@")
-
-  clear_screen
-  printf "%s\n%s\n%s\n\n" "$BANNER_LINE" "$BANNER_TITLE" "$BANNER_LINE"
-  printf "%s\n" "$MENU_DESCRIPTION"
-  printf "Press 'q' at any time to exit. Vim keys (j/k) also work.\n\n"
-
-  for idx in "${!options[@]}"; do
-    if [[ $idx -eq $selected ]]; then
-      printf "> %s\n" "${options[$idx]}"
-    else
-      printf "  %s\n" "${options[$idx]}"
-    fi
-  done
-  printf "\n%s\n" "$BANNER_LINE"
-}
-
-# Presents an arrow-key driven menu and stores the user's choice in MENU_SELECTION.
-interactive_menu() {
-  local options=("$@")
-  local selected=0
-  local key
-
-  while true; do
-    draw_menu "$selected" "${options[@]}"
-
-    if ! read -rsn1 key; then
-      continue
-    fi
-
-    case $key in
-      $'\x1b')
-        # Expecting an escape sequence such as ESC [ A / ESC [ B for arrow keys.
-        if ! read -rsn1 -t "$MENU_ARROW_TIMEOUT" key || [[ $key != "[" ]]; then
-          continue
-        fi
-        if ! read -rsn1 -t "$MENU_ARROW_TIMEOUT" key; then
-          continue
-        fi
-        case $key in
-          A)
-            selected=$(( (selected - 1 + ${#options[@]}) % ${#options[@]} ))
-            ;;
-          B)
-            selected=$(( (selected + 1) % ${#options[@]} ))
-            ;;
-        esac
-        ;;
-      k|K)
-        selected=$(( (selected - 1 + ${#options[@]}) % ${#options[@]} ))
-        ;;
-      j|J)
-        selected=$(( (selected + 1) % ${#options[@]} ))
-        ;;
-      "")
-        MENU_SELECTION="${options[$selected]}"
-        clear_screen
-        return 0
-        ;;
-      q|Q)
-        MENU_SELECTION="Exit"
-        clear_screen
-        return 0
-        ;;
-    esac
-  done
-}
-
 handle_profile_setup() {
   local profile=${1:-$DEFAULT_PROFILE}
   local os_name
@@ -623,23 +644,42 @@ parse_args() {
 main() {
   parse_args "$@"
 
-  MENU_DESCRIPTION="$PROFILE_MENU_DESCRIPTION"
-  interactive_menu "${MENU_OPTIONS[@]}"
-  local profile_choice=$MENU_SELECTION
+  ENVSETUP_SELECTED_PROFILE=""
+  envsetup_menu_select_profile "$BANNER_TITLE" "$PROFILE_MENU_DESCRIPTION" "${MENU_OPTIONS[@]}"
+  local profile_choice="${ENVSETUP_SELECTED_PROFILE:-}"
 
   printf "%s\n%s\n%s\n" "$BANNER_LINE" "$BANNER_TITLE" "$BANNER_LINE"
   log_info "Selected profile: ${profile_choice:-<none>}"
 
-  if [[ $profile_choice == "Exit" ]]; then
+  if [[ -z $profile_choice || $profile_choice == "Exit" ]]; then
     log_info "Goodbye!"
     printf "\n%s\n" "$BANNER_LINE"
     return 0
   fi
 
-  if ! choose_reload_strategy; then
-    printf "\n%s\n" "$BANNER_LINE"
-    return 0
-  fi
+  ENVSETUP_RELOAD_MODE=""
+  envsetup_menu_choose_reload "$RELOAD_MENU_DESCRIPTION"
+
+  case "${ENVSETUP_RELOAD_MODE:-}" in
+    auto)
+      AUTO_RELOAD_TMUX=true
+      AUTO_SOURCE_ZSH=true
+      ;;
+    manual)
+      AUTO_RELOAD_TMUX=false
+      AUTO_SOURCE_ZSH=false
+      ;;
+    cancel|Exit|"")
+      log_info "User canceled during reload preference selection."
+      printf "\n%s\n" "$BANNER_LINE"
+      return 0
+      ;;
+    *)
+      log_error "Unexpected reload selection: ${ENVSETUP_RELOAD_MODE:-<none>}"
+      printf "\n%s\n" "$BANNER_LINE"
+      exit 1
+      ;;
+  esac
 
   case $profile_choice in
     Default)
@@ -647,6 +687,9 @@ main() {
       ;;
     Developer)
       handle_profile_setup "$DEVELOPER_PROFILE"
+      ;;
+    Backups)
+      handle_backup_restore
       ;;
     *)
       log_error "No valid profile selection detected."
