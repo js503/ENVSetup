@@ -31,11 +31,7 @@ fetch_sessions() {
     return 1
   fi
 
-  if ! tmux list-sessions >/dev/null 2>&1; then
-    return 1
-  fi
-
-  tmux list-sessions -F '#S' 2>/dev/null
+  tmux list-sessions -F '#S' 2>/dev/null || return 1
 }
 
 draw_menu() {
@@ -98,24 +94,11 @@ interactive_select() {
   done
 }
 
-collect_sessions() {
-  local sessions=()
-  while IFS= read -r session; do
-    sessions+=("$session")
-  done < <(fetch_sessions || true)
-
-  printf '%s\0' "${sessions[@]}"
-}
-
 main() {
   local sessions=()
-  local session_buffer
-  session_buffer=$(collect_sessions)
-  if [[ -n $session_buffer ]]; then
-    while IFS= read -r -d '' entry; do
-      sessions+=("$entry")
-    done <<<"$session_buffer"
-  fi
+  while IFS= read -r session; do
+    [[ -n $session ]] && sessions+=("$session")
+  done < <(fetch_sessions || true)
 
   if [[ ${#sessions[@]} -eq 0 ]]; then
     log_info "No tmux sessions available."

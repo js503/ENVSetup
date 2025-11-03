@@ -28,13 +28,46 @@ envsetup_tmux_tv() {
 }
 
 envsetup_tmux_tls() {
-  if [[ -x "$ENV_SETUP_TMUX_MENU" ]]; then
-    "$ENV_SETUP_TMUX_MENU"
-  else
-    echo "tmux menu helper not found at $ENV_SETUP_TMUX_MENU" >&2
-    echo "Run env_setup.sh to install or set ENV_SETUP_TMUX_MENU manually." >&2
+  if ! command -v tmux >/dev/null 2>&1; then
+    echo "tmux is not available on PATH." >&2
     return 1
   fi
+
+  local sessions=()
+  while IFS= read -r session; do
+    [[ -n $session ]] && sessions+=("$session")
+  done < <(tmux list-sessions -F '#S' 2>/dev/null || true)
+
+  if [[ ${#sessions[@]} -eq 0 ]]; then
+    echo "No tmux sessions found." >&2
+    return 0
+  fi
+
+  echo "Available tmux sessions:" >&2
+  local index=1
+  for session in "${sessions[@]}"; do
+    printf "  [%d] %s\n" "$index" "$session" >&2
+    index=$((index + 1))
+  done
+  echo "  [0] Cancel" >&2
+
+  local choice
+  while true; do
+    read -r "choice?Select session #: "
+    [[ -z $choice ]] && continue
+    if [[ $choice =~ ^[0-9]+$ && $choice -le ${#sessions[@]} ]]; then
+      break
+    fi
+    echo "Invalid selection." >&2
+  done
+
+  if [[ $choice -eq 0 ]]; then
+    echo "Cancelled." >&2
+    return 0
+  fi
+
+  local target_session=${sessions[$((choice - 1))]}
+  tmux attach-session -t "$target_session"
 }
 
 envsetup_tmux_tko() {
